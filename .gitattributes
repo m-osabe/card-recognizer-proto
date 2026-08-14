@@ -1,0 +1,40 @@
+# Auto-detect text files and normalize line endings to LF on commit
+* text=auto eol=lf
+
+# Explicit text file types
+*.py text diff=python eol=lf
+*.md text diff=markdown eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+
+# Shell / Batch scripts
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Git configuration files
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Image and media binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.bmp binary
+*.gif binary
+*.ico binary
+*.svg text
+
+# Data and Cache binary files
+*.pkl binary
+*.pickle binary
+*.npy binary
+*.npz binary
+*.dat binary
