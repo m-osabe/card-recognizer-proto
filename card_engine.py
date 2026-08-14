@@ -128,8 +128,7 @@ class CardRecognitionEngine:
         elif method == "embedding":
             candidates = emb_results[:top_k]
         else:
-            # アンサンブル: SIFTのインライア信頼度と全体色彩の類似度を組み合わせ
-            # SIFTは幾何学的確定性が高いため重みを大きく配分
+            # アンサンブル: イラスト領域加重SIFTスコアと色彩類似度を組み合わせ
             scores_map = {}
             for r in sift_results:
                 cid = r["card_id"]
@@ -138,6 +137,8 @@ class CardRecognitionEngine:
                     "name": r["name"],
                     "sift_score": r["score"],
                     "inliers": r["inliers"],
+                    "ill_inliers": r.get("ill_inliers", 0),
+                    "title_inliers": r.get("title_inliers", 0),
                     "emb_score": 0.0,
                     "image_path": r["image_path"],
                 }
@@ -149,6 +150,8 @@ class CardRecognitionEngine:
                         "name": r["name"],
                         "sift_score": 0.0,
                         "inliers": 0,
+                        "ill_inliers": 0,
+                        "title_inliers": 0,
                         "emb_score": r["score"],
                         "image_path": r["image_path"],
                     }
@@ -156,19 +159,21 @@ class CardRecognitionEngine:
                     scores_map[cid]["emb_score"] = r["score"]
 
             for item in scores_map.values():
-                # アンサンブルスコア = SIFTスコア (70%) + Embeddingスコア (30%)
-                # SIFTのインライアが十分（>=15）ある場合は確信度を高く評価
-                sift_w = 0.7
-                emb_w = 0.3
-                if item["inliers"] >= 15:
-                    combined = item["sift_score"] * 0.8 + item["emb_score"] * 0.2
+                sift_s = item["sift_score"]
+                emb_s = item["emb_score"]
+                ill_inl = item["ill_inliers"]
+
+                # イラストインライアが10個以上ある場合は、イラスト一致の確信度ボーナス
+                if ill_inl >= 10:
+                    combined = sift_s * 0.5 + emb_s * 0.5 + 10.0
                 else:
-                    combined = item["sift_score"] * sift_w + item["emb_score"] * emb_w
+                    combined = sift_s * 0.3 + emb_s * 0.7
+
                 item["combined_score"] = combined
 
             candidates = sorted(
                 scores_map.values(),
-                key=lambda x: (x.get("combined_score", 0), x.get("inliers", 0)),
+                key=lambda x: (x.get("combined_score", 0), x.get("ill_inliers", 0)),
                 reverse=True,
             )[:top_k]
 
