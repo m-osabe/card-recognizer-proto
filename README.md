@@ -45,6 +45,44 @@ card-recognizer/
 
 ---
 
+## 🛠️ 環境構築・セットアップ
+
+Python 3.8以上がインストールされている環境で実行してください。
+
+### 1. 仮想環境（venv）の作成と有効化
+
+```bash
+# 1. 仮想環境の作成
+python -m venv .venv
+```
+
+**仮想環境の有効化（OS別）:**
+
+- **Windows (PowerShell):**
+  ```powershell
+  .\.venv\Scripts\Activate.ps1
+  ```
+  > **Note**: PowerShellでスクリプト実行権限エラーが出る場合は、先に `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` を実行してください。
+
+- **Windows (コマンドプロンプト cmd.exe):**
+  ```cmd
+  .venv\Scripts\activate.bat
+  ```
+
+- **macOS / Linux:**
+  ```bash
+  source .venv/bin/activate
+  ```
+
+### 2. 依存ライブラリのインストール
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+---
+
 ## 🚀 クイックスタート
 
 ### 1. デモサンプルで即座に動作確認する
