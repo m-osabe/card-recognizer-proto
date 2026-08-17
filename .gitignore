@@ -86,7 +86,11 @@ $RECYCLE.BIN/
 output/*
 !output/.gitkeep
 data/index/*
+data/test/*
+data/master/*
+!data/master/.gitkeep
 !data/index/.gitkeep
+!data/test/.gitkeep
 
 # Temporary / Log files
 *.log
