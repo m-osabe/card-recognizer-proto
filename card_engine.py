@@ -18,7 +18,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from card_detector import CardDetector
+from card_detector import CardDetector, four_point_transform
 from matcher_sift import SIFTCardMatcher
 from matcher_embedding import EmbeddingCardMatcher
 
@@ -114,12 +114,49 @@ class CardRecognitionEngine:
             orig_img = image_input.copy()
             input_name = "query_image"
 
-        # 1. カード領域の自動検出 & 透視変換
+        # 1. カード領域の自動検出 & 透視変換（Bottom-Up）
         cropped_card, corners, meta = self.detector.detect_and_crop(orig_img)
 
         # 2. 各マッチャーでスコアリング
-        sift_results = self.sift_matcher.match(cropped_card, top_k=top_k * 2)
-        emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
+        if meta.get("detected", False):
+            # 枠検出成功時: 切り出し画像に対して高速照合
+            sift_results = self.sift_matcher.match(cropped_card, top_k=top_k * 2)
+            emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
+        else:
+            # 枠検出失敗時: 元画像全体からTop-Down SIFT照合を実行（手持ち・黒縁対策）
+            orig_h, orig_w = orig_img.shape[:2]
+            scale = 1000.0 / max(orig_h, orig_w) if max(orig_h, orig_w) > 1000 else 1.0
+            if scale < 1.0:
+                query_img = cv2.resize(orig_img, (int(orig_w * scale), int(orig_h * scale)))
+            else:
+                query_img = orig_img
+
+            sift_results = self.sift_matcher.match(query_img, top_k=top_k * 2)
+
+            # SIFTで有力な幾何マッチ（Homography）が存在する場合、四隅を逆算して正面化
+            if sift_results and sift_results[0].get("homography") is not None:
+                top_match = sift_results[0]
+                master_card_id = top_match["card_id"]
+                master_data = self.sift_matcher.master_db.get(master_card_id)
+
+                if master_data:
+                    m_shape = master_data.get("shape", (self.detector.target_height, self.detector.target_width))
+                    est_corners = self.sift_matcher.estimate_corners_from_homography(
+                        m_shape, top_match["homography"], scale=(1.0 / scale)
+                    )
+
+                    if est_corners is not None:
+                        corners = est_corners
+                        # 復元された四隅から正面カード画像を切り出し
+                        cropped_card = four_point_transform(
+                            orig_img, corners, (self.detector.target_width, self.detector.target_height)
+                        )
+                        meta["detected"] = True
+                        meta["detection_method"] = "top_down_sift"
+                        meta["corners"] = corners.tolist()
+
+            # 正面画像（またはリサイズ画像）からEmbedding特徴量を計算
+            emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
 
         # 3. 手法に応じた集約
         candidates = []

@@ -12,9 +12,9 @@ from typing import List, Dict, Tuple, Optional
 
 
 class SIFTCardMatcher:
-    def __init__(self, max_features: int = 1000, ratio_threshold: float = 0.75):
+    def __init__(self, max_features: int = 2000, ratio_threshold: float = 0.75):
         """
-        max_features: 各カード画像から抽出する最大特徴点数 (500〜1500程度がバランス良好)
+        max_features: 各カード画像から抽出する最大特徴点数 (手持ち写真全体のノイズに対処するため2000点に拡張)
         ratio_threshold: Lowe's ratio test の閾値 (0.7〜0.75)
         """
         self.max_features = max_features
@@ -139,6 +139,64 @@ class SIFTCardMatcher:
 
         results.sort(key=lambda x: (x["score"], x["ill_inliers"]), reverse=True)
         return results[:top_k]
+
+    @staticmethod
+    def estimate_corners_from_homography(
+        master_shape: Tuple[int, int, int], homography: np.ndarray, scale: float = 1.0
+    ) -> Optional[np.ndarray]:
+        """
+        マスター画像の形状とホモグラフィ行列 H (query -> master) から、
+        クエリ画像（写真）上のカード4頂点座標を逆算して返す。
+        scale: クエリ画像がリサイズされていた場合の逆スケール係数 (orig_size / query_size)
+        Returns:
+            np.ndarray of shape (4, 2) with [x, y] coordinates in original photo, or None
+        """
+        if homography is None:
+            return None
+
+        h_m, w_m = master_shape[:2]
+        # マスター画像の4隅 [左上, 右上, 右下, 左下]
+        master_corners = np.array(
+            [[0, 0], [w_m - 1, 0], [w_m - 1, h_m - 1], [0, h_m - 1]],
+            dtype="float32",
+        ).reshape(-1, 1, 2)
+
+        try:
+            # H は query -> master なので、逆行列 H_inv は master -> query
+            h_inv = np.linalg.inv(homography)
+            query_corners = cv2.perspectiveTransform(master_corners, h_inv)
+            corners = query_corners.reshape(4, 2) * scale
+
+            # 幾何学的な妥当性検証
+            approx_int = corners.astype(np.int32).reshape(-1, 1, 2)
+            if not cv2.isContourConvex(approx_int):
+                return None
+
+            area = cv2.contourArea(approx_int)
+            if area < 5000:  # 面積が極小（退化）
+                return None
+
+            # 4辺の長さをチェックし、極端に細長かったり歪んでいないか確認
+            p = corners
+            side_lens = [
+                np.linalg.norm(p[0] - p[1]),
+                np.linalg.norm(p[1] - p[2]),
+                np.linalg.norm(p[2] - p[3]),
+                np.linalg.norm(p[3] - p[0]),
+            ]
+            w_avg = (side_lens[0] + side_lens[2]) / 2.0
+            h_avg = (side_lens[1] + side_lens[3]) / 2.0
+
+            if w_avg < 20 or h_avg < 20:
+                return None
+
+            aspect = min(w_avg, h_avg) / max(w_avg, h_avg)
+            if aspect < 0.35 or aspect > 0.95:  # TCGの標準縦横比 (約0.7) から極端に乖離
+                return None
+
+            return corners
+        except Exception:
+            return None
 
     def save_index(self, filepath: str):
         """マスターDBをファイルに保存"""

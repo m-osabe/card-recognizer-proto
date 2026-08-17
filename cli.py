@@ -111,21 +111,35 @@ def cmd_evaluate(args, engine: CardRecognitionEngine):
         print(f"テスト画像がありません: {test_dir}")
         return
 
+    # --limit オプション対応
+    limit = getattr(args, "limit", None)
+    if limit and limit > 0:
+        test_files = test_files[:limit]
+
     print(f"テスト対象画像数: {len(test_files)} 枚")
     print(f"テストディレクトリ: {test_dir}")
-    print("-" * 60)
+    print("-" * 88)
 
     correct_top1 = 0
     correct_top3 = 0
     detected_count = 0
     total_time = 0.0
 
-    print(f"{'ファイル名':<30} {'正解カード':<20} {'判定結果':<20} {'スコア':<8} {'結果':<6}")
+    print(f"{'ファイル名':<25} {'正解カード':<15} {'判定結果':<15} {'スコア':<8} {'検出':<6} {'結果':<6}")
     print("-" * 88)
 
+    import re
     for fpath in test_files:
-        # ファイル名から正解カードIDを推定 (test_photo_001_Flame_Dragon.jpg -> 001_Flame_Dragon)
-        ground_truth = fpath.stem.replace("test_photo_", "")
+        stem = fpath.stem
+        # ファイル名から正解カードIDを推定
+        if stem.startswith("test_photo_"):
+            ground_truth = stem.replace("test_photo_", "")
+        else:
+            m = re.match(r"card_(\d+)_", stem)
+            if m:
+                ground_truth = f"card-{int(m.group(1))}"
+            else:
+                ground_truth = stem
 
         t0 = time.time()
         res = engine.identify(
@@ -134,6 +148,7 @@ def cmd_evaluate(args, engine: CardRecognitionEngine):
         t_elapsed = time.time() - t0
         total_time += t_elapsed
 
+        det_str = "[OK]" if res["detected"] else "[NG]"
         if res["detected"]:
             detected_count += 1
 
@@ -156,7 +171,7 @@ def cmd_evaluate(args, engine: CardRecognitionEngine):
             correct_top3 += 1
 
         score_str = f"{cands[0].get('combined_score', cands[0].get('score', 0)):.1f}" if cands else "0.0"
-        print(f"{fpath.name[:28]:<30} {ground_truth[:18]:<20} {top1_id[:18]:<20} {score_str:<8} {mark:<6}")
+        print(f"{fpath.name[:23]:<25} {ground_truth[:13]:<15} {top1_id[:13]:<15} {score_str:<8} {det_str:<6} {mark:<6}")
 
     print("=" * 88)
     n = len(test_files)
@@ -189,6 +204,7 @@ def main():
     p_eval = subparsers.add_parser("evaluate", help="テスト画像フォルダを一括評価")
     p_eval.add_argument("--test-dir", type=str, help="テスト画像フォルダのパス")
     p_eval.add_argument("--method", type=str, default="ensemble", choices=["ensemble", "sift", "embedding"], help="照合手法")
+    p_eval.add_argument("--limit", type=int, default=None, help="評価する画像枚数の上限")
 
     args = parser.parse_args()
 
