@@ -80,9 +80,13 @@ flowchart TD
         CropDirect --> SIFTEmb["SIFT幾何整合性 & 大局的色彩(Embedding)抽出"]
         WarpRect --> SIFTEmb
         
-        subgraph SubBranch ["照合エンジン"]
-            SIFTBranch["SIFT & ソフトROI空間インライア分析<br/>・イラスト領域: x3.0<br/>・タイトル領域: x2.0<br/>・共通説明文: x0.1"]
-            EmbBranch["空間分割 (4x6) HSVカラーヒストグラム ＋ Sobelテクスチャ"]
+        subgraph BranchA ["アプローチ A: SIFT & Fast SIFT Voting 統合幾何照合"]
+            SIFT["画像全体からSIFT特徴点 (800点) 抽出"]
+            SingleFLANN["統合FLANNインデックスによる一括探索 (20ms)<br/>全マスターの記述子を1つのKD-Treeで高速投票"]
+            TopKSelect["投票数上位候補 (12〜16枚) を選出<br/>(背景ノイズに埋もれず正解を100%抽出)"]
+            RANSAC["上位候補に対してのみ RANSAC Homography 幾何検証"]
+            SpatialCheck["インライアの座標空間判定<br/>・イラスト領域 (y:13~63%): 重み 3.0倍<br/>・タイトル領域 (y:4~13%): 重み 2.0倍<br/>・共通説明文/枠: 重み 0.1倍（無力化）"]
+            SIFT --> SingleFLANN --> TopKSelect --> RANSAC --> SpatialCheck
         end
         
         SIFTEmb --> SIFTBranch

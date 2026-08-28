@@ -12,26 +12,27 @@ from typing import List, Dict, Tuple, Optional
 
 
 class SIFTCardMatcher:
-    def __init__(self, max_features: int = 2000, ratio_threshold: float = 0.75):
+    def __init__(self, max_features: int = 800, ratio_threshold: float = 0.75):
         """
-        max_features: 各カード画像から抽出する最大特徴点数 (手持ち写真全体のノイズに対処するため2000点に拡張)
+        max_features: 各カード画像から抽出する最大特徴点数 (600〜800程度で高速かつ高精度)
         ratio_threshold: Lowe's ratio test の閾値 (0.7〜0.75)
         """
         self.max_features = max_features
         self.ratio_threshold = ratio_threshold
         self.sift = cv2.SIFT_create(nfeatures=max_features)
 
-        # FLANN マッチャーの設定 (KDTree)
-        FLANN_INDEX_KDTREE = 1
-        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-        search_params = dict(checks=50)
-        self.flann = cv2.FlannBasedMatcher(index_params, search_params)
-
-        # マスターカードの特徴量キャッシュ {card_id: {'name': ..., 'kp_pts': ..., 'des': ..., 'shape': ...}}
+        # マスターカードの特徴量キャッシュ
         self.master_db: Dict[str, dict] = {}
+        
+        # 統合FLANNインデックス用キャッシュ
+        self.flann_index: Optional[cv2.flann_Index] = None
+        self.all_des_matrix: Optional[np.ndarray] = None
+        self.des_to_card_idx: Optional[np.ndarray] = None
+        self.card_id_list: List[str] = []
+        self._index_built = False
 
     def extract_features(self, image: np.ndarray) -> Tuple[List[cv2.KeyPoint], Optional[np.ndarray]]:
-        """画像全体から安定してSIFTキーポイントと記述子を抽出（幾何学的整合性を最大化）"""
+        """画像全体から安定してSIFTキーポイントと記述子を抽出"""
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
@@ -57,14 +58,47 @@ class SIFTCardMatcher:
                 "shape": image.shape,
                 "image_path": image_path,
             }
+            self._index_built = False
             return True
         return False
 
+    def build_unified_flann_index(self):
+        """全マスターカードの特徴点を1つの巨大KD-Treeインデックスに一括統合 (Fast SIFT Voting用)"""
+        if not self.master_db or self._index_built:
+            return
+
+        all_des = []
+        des_to_card_idx = []
+        self.card_id_list = []
+
+        for idx, (cid, data) in enumerate(self.master_db.items()):
+            des = data["des"]
+            if des is not None and len(des) > 0:
+                all_des.append(des)
+                des_to_card_idx.extend([idx] * len(des))
+                self.card_id_list.append(cid)
+
+        if all_des:
+            self.all_des_matrix = np.vstack(all_des).astype(np.float32)
+            self.des_to_card_idx = np.array(des_to_card_idx, dtype=np.int32)
+            FLANN_INDEX_KDTREE = 1
+            self.flann_index = cv2.flann_Index(
+                self.all_des_matrix, dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+            )
+            self._index_built = True
+
     def match(
-        self, query_image: np.ndarray, top_k: int = 5
+        self,
+        query_image: np.ndarray,
+        top_k: int = 5,
+        target_card_ids: Optional[List[str]] = None,
+        coarse_top_n: int = 12,
     ) -> List[Dict]:
         """
-        クエリ画像に対してマスターDBを検索し、イラスト・タイトルのソフト領域加重スコアで上位候補を返す。
+        Fast SIFT Voting による超高速・背景耐性照合:
+        1. 統合KD-Treeで全マスターに対する特徴点マッチングを1回で実行 (数ms〜数十ms)
+        2. 背景ノイズに埋もれず、カード部分の特徴点投票数が多い上位候補 (coarse_top_n) を選出
+        3. 上位候補に対してのみ RANSAC Homography 幾何検証を実行 (数百ms)
         """
         if not self.master_db:
             return []
@@ -73,32 +107,72 @@ class SIFTCardMatcher:
         if q_des is None or len(q_des) < 10:
             return []
 
+        # 統合インデックスの準備
+        self.build_unified_flann_index()
+
+        # Step 1: 統合FLANNインデックスによる一括 k-NN 探索 (k=2)
+        indices, dists = self.flann_index.knnSearch(
+            q_des.astype(np.float32), 2, params=dict(checks=50)
+        )
+
+        # Step 2: Lowe's Ratio Test & カード別マッチング蓄積
+        matches_by_card: Dict[str, List[Tuple[int, int]]] = {}
+        votes_by_card: Dict[str, int] = {}
+
+        for q_idx in range(len(q_des)):
+            d1, d2 = dists[q_idx][0], dists[q_idx][1]
+            if d1 < self.ratio_threshold * d2:
+                m_global_des_idx = indices[q_idx][0]
+                c_idx = self.des_to_card_idx[m_global_des_idx]
+                cid = self.card_id_list[c_idx]
+
+                if target_card_ids is not None and cid not in target_card_ids:
+                    continue
+
+                votes_by_card[cid] = votes_by_card.get(cid, 0) + 1
+                if cid not in matches_by_card:
+                    matches_by_card[cid] = []
+                matches_by_card[cid].append((q_idx, m_global_des_idx))
+
+        if not votes_by_card:
+            return []
+
+        # 投票数上位候補を選出 (Coarse SIFT Selection)
+        sorted_candidates = sorted(votes_by_card.items(), key=lambda x: x[1], reverse=True)[
+            : max(coarse_top_n, top_k * 2)
+        ]
+
+        # Step 3: 上位候補に対してのみ RANSAC 幾何検証を実行 (Fine Verification)
         results = []
 
-        for card_id, master_data in self.master_db.items():
+        # 各カードのマスターデータ内でのローカルインデックス算出用マップ
+        for card_id, vote_count in sorted_candidates:
+            master_data = self.master_db[card_id]
+            m_kp_data = master_data["kp_data"]
             m_des = master_data["des"]
-            if m_des is None or len(m_des) < 10:
-                continue
 
+            # カード固有の単体マッチングを実行して確実なキーポイント対応を作成
+            # 投票で絞り込まれた上位候補のみなので超高速 (数ms/カード)
+            flann_local = cv2.FlannBasedMatcher(
+                dict(algorithm=1, trees=4), dict(checks=32)
+            )
             try:
-                matches = self.flann.knnMatch(q_des, m_des, k=2)
+                local_matches = flann_local.knnMatch(q_des, m_des, k=2)
             except Exception:
                 continue
 
             good_matches = []
-            for match_pair in matches:
-                if len(match_pair) == 2:
-                    m, n = match_pair
-                    if m.distance < self.ratio_threshold * n.distance:
-                        good_matches.append(m)
+            for pair in local_matches:
+                if len(pair) == 2 and pair[0].distance < self.ratio_threshold * pair[1].distance:
+                    good_matches.append(pair[0])
 
             inliers_count = 0
             ill_inliers = 0
             title_inliers = 0
             homography = None
 
-            if len(good_matches) >= 8:
-                m_kp_pts = [p[0] for p in master_data["kp_data"]]
+            if len(good_matches) >= 6:
+                m_kp_pts = [p[0] for p in m_kp_data]
                 src_pts = np.float32([q_kp[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
                 dst_pts = np.float32([m_kp_pts[m.trainIdx] for m in good_matches]).reshape(-1, 1, 2)
 
@@ -118,7 +192,7 @@ class SIFTCardMatcher:
             else:
                 inliers_count = len(good_matches)
 
-            # ソフト領域加重: イラスト(x3.0) + タイトル(x2.0) + 共通枠(x0.1)
+            # ソフト領域加重
             common_inliers = max(0, inliers_count - ill_inliers - title_inliers)
             weighted_inliers = ill_inliers * 3.0 + title_inliers * 2.0 + common_inliers * 0.1
 
@@ -133,11 +207,12 @@ class SIFTCardMatcher:
                 "ill_inliers": ill_inliers,
                 "title_inliers": title_inliers,
                 "good_matches": len(good_matches),
+                "votes": vote_count,
                 "image_path": master_data.get("image_path"),
                 "homography": homography,
             })
 
-        results.sort(key=lambda x: (x["score"], x["ill_inliers"]), reverse=True)
+        results.sort(key=lambda x: (x["inliers"], x["score"]), reverse=True)
         return results[:top_k]
 
     @staticmethod

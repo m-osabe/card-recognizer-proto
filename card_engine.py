@@ -80,6 +80,8 @@ class CardRecognitionEngine:
         """保存されたインデックスをロード"""
         sift_ok = self.sift_matcher.load_index(str(self.index_dir / "sift_index.pkl"))
         emb_ok = self.emb_matcher.load_index(str(self.index_dir / "emb_index.pkl"))
+        if sift_ok:
+            self.sift_matcher.build_unified_flann_index()
         return sift_ok and emb_ok
 
     def identify(
@@ -117,13 +119,17 @@ class CardRecognitionEngine:
         # 1. カード領域の自動検出 & 透視変換（Bottom-Up）
         cropped_card, corners, meta = self.detector.detect_and_crop(orig_img)
 
-        # 2. 各マッチャーでスコアリング
+        # 2. 各マッチャーでスコアリング (Fast SIFT Voting + RANSAC 2段階探索)
+        # 背景（机・指・影）ノイズに左右されないよう、SIFT特徴点の統合FLANN投票で全マスターから上位候補 (12〜16枚) を瞬時選出 (数十ms)
+        # その後、選出された有力候補に対してのみ RANSAC 幾何検証を実行 (数百ms)
         if meta.get("detected", False):
-            # 枠検出成功時: 切り出し画像に対して高速照合
-            sift_results = self.sift_matcher.match(cropped_card, top_k=top_k * 2)
+            # 枠検出成功時: 切り出し正面画像から高速照合
+            sift_results = self.sift_matcher.match(
+                cropped_card, top_k=top_k * 2, coarse_top_n=max(15, top_k * 3)
+            )
             emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
         else:
-            # 枠検出失敗時: 元画像全体からTop-Down SIFT照合を実行（手持ち・黒縁対策）
+            # 枠検出失敗時（手持ち写真・背景あり写真）: 元画像全体から Fast SIFT Voting 照合を実行
             orig_h, orig_w = orig_img.shape[:2]
             scale = 1000.0 / max(orig_h, orig_w) if max(orig_h, orig_w) > 1000 else 1.0
             if scale < 1.0:
@@ -131,9 +137,11 @@ class CardRecognitionEngine:
             else:
                 query_img = orig_img
 
-            sift_results = self.sift_matcher.match(query_img, top_k=top_k * 2)
+            sift_results = self.sift_matcher.match(
+                query_img, top_k=top_k * 2, coarse_top_n=max(15, top_k * 3)
+            )
 
-            # SIFTで有力な幾何マッチ（Homography）が存在する場合、四隅を逆算して正面化
+            # SIFTで有力な幾何マッチ（Homography）が存在する場合、四隅を逆算して正面化 (Top-Down)
             if sift_results and sift_results[0].get("homography") is not None:
                 top_match = sift_results[0]
                 master_card_id = top_match["card_id"]
@@ -147,7 +155,6 @@ class CardRecognitionEngine:
 
                     if est_corners is not None:
                         corners = est_corners
-                        # 復元された四隅から正面カード画像を切り出し
                         cropped_card = four_point_transform(
                             orig_img, corners, (self.detector.target_width, self.detector.target_height)
                         )
@@ -155,7 +162,6 @@ class CardRecognitionEngine:
                         meta["detection_method"] = "top_down_sift"
                         meta["corners"] = corners.tolist()
 
-            # 正面画像（またはリサイズ画像）からEmbedding特徴量を計算
             emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
 
         # 3. 手法に応じた集約
