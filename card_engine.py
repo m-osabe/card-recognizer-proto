@@ -120,25 +120,28 @@ class CardRecognitionEngine:
         cropped_card, corners, meta = self.detector.detect_and_crop(orig_img)
 
         # 2. 各マッチャーでスコアリング (Fast SIFT Voting + RANSAC 2段階探索)
-        # 背景（机・指・影）ノイズに左右されないよう、SIFT特徴点の統合FLANN投票で全マスターから上位候補 (12〜16枚) を瞬時選出 (数十ms)
-        # その後、選出された有力候補に対してのみ RANSAC 幾何検証を実行 (数百ms)
+        orig_h, orig_w = orig_img.shape[:2]
+        scale = 1000.0 / max(orig_h, orig_w) if max(orig_h, orig_w) > 1000 else 1.0
+        query_orig = cv2.resize(orig_img, (int(orig_w * scale), int(orig_h * scale))) if scale < 1.0 else orig_img
+
         if meta.get("detected", False):
-            # 枠検出成功時: 切り出し正面画像から高速照合
+            # 枠検出成功時: 切り出し正面画像から照合
             sift_results = self.sift_matcher.match(
-                cropped_card, top_k=top_k * 2, coarse_top_n=max(15, top_k * 3)
+                cropped_card, top_k=top_k * 2, coarse_top_n=max(16, top_k * 3)
             )
+            # もし切り出し画像での最高インライアが8未満（枠ズレの可能性）の場合、元画像全体でも補完照合
+            if not sift_results or sift_results[0].get("inliers", 0) < 8:
+                orig_sift = self.sift_matcher.match(
+                    query_orig, top_k=top_k * 2, coarse_top_n=max(16, top_k * 3)
+                )
+                if orig_sift and (not sift_results or orig_sift[0].get("inliers", 0) > sift_results[0].get("inliers", 0)):
+                    sift_results = orig_sift
+
             emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
         else:
-            # 枠検出失敗時（手持ち写真・背景あり写真）: 元画像全体から Fast SIFT Voting 照合を実行
-            orig_h, orig_w = orig_img.shape[:2]
-            scale = 1000.0 / max(orig_h, orig_w) if max(orig_h, orig_w) > 1000 else 1.0
-            if scale < 1.0:
-                query_img = cv2.resize(orig_img, (int(orig_w * scale), int(orig_h * scale)))
-            else:
-                query_img = orig_img
-
+            # 枠検出失敗時: 元画像全体から Fast SIFT Voting 照合を実行
             sift_results = self.sift_matcher.match(
-                query_img, top_k=top_k * 2, coarse_top_n=max(15, top_k * 3)
+                query_orig, top_k=top_k * 2, coarse_top_n=max(16, top_k * 3)
             )
 
             # SIFTで有力な幾何マッチ（Homography）が存在する場合、四隅を逆算して正面化 (Top-Down)
@@ -204,27 +207,26 @@ class CardRecognitionEngine:
                     scores_map[cid]["emb_score"] = r["score"]
 
             for item in scores_map.values():
-                sift_s = item["sift_score"]
-                emb_s = item["emb_score"]
+                sift_s = item["sift_score"]  # 0〜100点 (シグモイド * 純度 * 幾何妥当性)
+                emb_s = item["emb_score"]    # 0〜100点 (中央80%クロップ コサイン類似度)
                 inl = item["inliers"]
-                ill_inl = item["ill_inliers"]
                 is_valid = item.get("is_geom_valid", False)
 
-                # 幾何整合性の確信度に応じた動的アンサンブル重み付け
-                if is_valid and (inl >= 8 or ill_inl >= 5):
-                    # 幾何学的証明（ホモグラフィ妥当性＋高純度インライア）が得られている場合はSIFTを最優先
-                    combined = 50.0 + min(50.0, sift_s * 1.5) + (emb_s * 0.1)
-                elif inl >= 6:
-                    combined = 40.0 + min(40.0, sift_s * 1.0) + (emb_s * 0.2)
+                # 幾何整合性の確信度に応じた滑らかな連続アンサンブル重み付け
+                if is_valid and inl >= 4:
+                    # 幾何学的証明（ホモグラフィ妥当性）が得られている場合はSIFTを最優先 (90%)
+                    combined = (sift_s * 0.90) + (emb_s * 0.10)
+                elif inl >= 3:
+                    combined = (sift_s * 0.70) + (emb_s * 0.30)
                 else:
-                    # 幾何マッチが乏しい場合は色彩特徴量を参考
-                    combined = (emb_s * 0.5) + (sift_s * 0.2)
+                    # 幾何マッチが取れなかった写真は色彩特徴量を参考 (最大50点)
+                    combined = emb_s * 0.50
 
                 item["combined_score"] = combined
 
             candidates = sorted(
                 scores_map.values(),
-                key=lambda x: (x.get("is_geom_valid", False), x.get("inliers", 0) >= 8, x.get("combined_score", 0), x.get("inliers", 0)),
+                key=lambda x: (x.get("is_geom_valid", False), x.get("inliers", 0), x.get("combined_score", 0)),
                 reverse=True,
             )[:top_k]
 

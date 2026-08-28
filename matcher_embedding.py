@@ -23,8 +23,16 @@ class GlobalFeatureExtractor:
         self.grid_y = grid_y
 
     def extract(self, image: np.ndarray) -> np.ndarray:
+        # 外周 10% のセーフティクロップ（机の木目・スリーブ枠・背景ノイズを完全遮断）
+        h, w = image.shape[:2]
+        pad_y = max(1, int(h * 0.10))
+        pad_x = max(1, int(w * 0.10))
+        cropped = image[pad_y : h - pad_y, pad_x : w - pad_x]
+        if cropped.shape[0] < 10 or cropped.shape[1] < 10:
+            cropped = image
+
         # 正規化サイズ (240x336)
-        img_resized = cv2.resize(image, (240, 336))
+        img_resized = cv2.resize(cropped, (240, 336))
         hsv = cv2.cvtColor(img_resized, cv2.COLOR_BGR2HSV)
         gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
 
@@ -50,13 +58,13 @@ class GlobalFeatureExtractor:
                 features.extend(hist_v.flatten())
 
         # 2. カード中央（イラスト領域）のディテールテクスチャ (Sobelエッジ強度・方向)
-        center_gray = gray[60:220, 30:210]  # 中央のイラスト領域をクロップ
+        center_gray = gray[40:200, 20:220]
         gx = cv2.Sobel(center_gray, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(center_gray, cv2.CV_32F, 0, 1, ksize=3)
         mag, angle = cv2.cartToPolar(gx, gy, angleInDegrees=True)
         hist_edge = cv2.calcHist([angle], [0], None, [16], [0, 360])
         cv2.normalize(hist_edge, hist_edge)
-        features.extend(hist_edge.flatten() * 2.0)  # テクスチャの重みを強める
+        features.extend(hist_edge.flatten() * 2.0)
 
         # L2正規化
         vec = np.array(features, dtype=np.float32)

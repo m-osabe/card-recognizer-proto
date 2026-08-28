@@ -6,8 +6,10 @@
 
 ## 📚 ドキュメント
 
-- [**性能改善記録: 2段階探索による高速化 (docs/PERFORMANCE_IMPROVEMENT_COARSE_TO_FINE.md)**](docs/PERFORMANCE_IMPROVEMENT_COARSE_TO_FINE.md) ★ NEW
-  - 200枚マスターで33秒 $\rightarrow$ 約0.9秒（約30倍高速化）を達成した2段階探索（Coarse-to-Fine）の実装記録
+- [**正答率向上計画書 Phase 3 (docs/ACCURACY_IMPROVEMENT_PHASE3.md)**](docs/ACCURACY_IMPROVEMENT_PHASE3.md) ★ NEW
+  - 正答率87.4%から95%超を達成するための残存エラー分析（暗所・低インライア・色彩逆転）と追加改善策の技術設計
+- [**性能改善記録: 2段階探索とTF-IDFによる高速化・高精度化 (docs/PERFORMANCE_IMPROVEMENT_COARSE_TO_FINE.md)**](docs/PERFORMANCE_IMPROVEMENT_COARSE_TO_FINE.md)
+  - 200枚マスターで33秒 $\rightarrow$ 約0.5秒（約60倍高速化）およびHubness問題を解決したTF-IDF加重の実装記録
 - [**アルゴリズム設計・技術選定書 (docs/ALGORITHM_DESIGN.md)**](docs/ALGORITHM_DESIGN.md)
   - なぜ「ゼロからのディープラーニング学習」を避けたのか
   - 階層型ハイブリッド枠検出（Bottom-Up ＆ Top-Down SIFT逆射影）

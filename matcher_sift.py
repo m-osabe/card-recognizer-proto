@@ -33,17 +33,17 @@ class SIFTCardMatcher:
         self._index_built = False
 
     def extract_features(self, image: np.ndarray) -> Tuple[List[cv2.KeyPoint], Optional[np.ndarray]]:
-        """画像全体から安定してSIFTキーポイントと記述子を抽出"""
+        """画像全体から暗所・反射耐性を高めてSIFTキーポイントと記述子を抽出"""
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image
 
-        # コントラスト強調（CLAHE）
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
+        # 多段階コントラスト強調（CLAHE clipLimit=3.0 で暗所・白飛びの微小テクスチャを掘り起こす）
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_enhanced = clahe.apply(gray)
 
-        kp, des = self.sift.detectAndCompute(gray, None)
+        kp, des = self.sift.detectAndCompute(gray_enhanced, None)
         return kp, des
 
     def register_card(self, card_id: str, name: str, image: np.ndarray, image_path: Optional[str] = None):
@@ -200,8 +200,9 @@ class SIFTCardMatcher:
                 src_pts = np.float32([q_kp[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
                 dst_pts = np.float32([m_kp_pts[m.trainIdx] for m in good_matches]).reshape(-1, 1, 2)
 
-                # RANSAC再投影誤差を 3.5px に厳格化
-                H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 3.5)
+                # 暗所適応型 RANSAC 再投影誤差 (通常 3.5px / 暗所・低インライア 4.5px)
+                ransac_thresh = 3.5 if len(good_matches) >= 15 else 4.5
+                H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransac_thresh)
                 if mask is not None:
                     inliers_count = int(np.sum(mask))
                     homography = H
@@ -221,23 +222,25 @@ class SIFTCardMatcher:
                                 elif 0.04 * h_m <= y < 0.13 * h_m:
                                     title_inliers += 1
                     else:
-                        # 幾何学的にあり得ない歪んだ変換の場合はインライアをペナルティ
                         inliers_count = int(inliers_count * 0.3)
             else:
                 inliers_count = len(good_matches)
 
-            # ソフト領域加重
+            # イラスト固有領域 (中央 13%〜63%) とタイトル領域 (4%〜13%) の超強化
+            # 外枠・フチ (y > 63% または y < 4%) の共通装飾ノイズをほぼゼロ化 (0.05倍)
             common_inliers = max(0, inliers_count - ill_inliers - title_inliers)
-            weighted_inliers = ill_inliers * 3.0 + title_inliers * 2.0 + common_inliers * 0.1
+            effective_inliers = (ill_inliers * 4.0) + (title_inliers * 2.5) + (common_inliers * 0.05)
 
             # インライア純度 (Purity) = インライア数 / GoodMatches数
             purity = (inliers_count / max(1, len(good_matches))) if good_matches else 0.0
+            purity_factor = 0.6 + 0.4 * np.sqrt(purity)
+
+            # シグモイド幾何スコア (イラスト・タイトル一致度を主軸に評価)
+            sig_val = 1.0 / (1.0 + np.exp(-0.35 * (effective_inliers - 3.5)))
+            geom_factor = 1.25 if is_geom_valid else 0.35
             
-            # 正規化信頼度スコア (純度と幾何妥当性を反映)
-            norm_factor = max(1.0, float(min(len(q_kp), len(m_des))))
-            confidence = (weighted_inliers / norm_factor) * 100.0 * purity
-            if is_geom_valid and inliers_count >= 10:
-                confidence *= 1.2  # 幾何妥当性ボーナス
+            # 総合SIFT信頼度スコア (イラスト加重インライア数 + シグモイド純度幾何スコア)
+            confidence = (effective_inliers * 5.0) + (80.0 * sig_val * purity_factor * geom_factor)
 
             results.append({
                 "card_id": card_id,
@@ -253,9 +256,9 @@ class SIFTCardMatcher:
                 "homography": homography,
             })
 
-        # 幾何妥当性、インライア数、純度スコアでソート
+        # 幾何妥当性、イラストインライア有無、総合信頼度スコアでソート
         results.sort(
-            key=lambda x: (x["is_geom_valid"], x["inliers"] >= 10, x["score"], x["inliers"]),
+            key=lambda x: (x["is_geom_valid"], x["ill_inliers"] >= 2, x["score"], x["inliers"]),
             reverse=True,
         )
         return results[:top_k]
