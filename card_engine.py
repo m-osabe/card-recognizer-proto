@@ -182,6 +182,7 @@ class CardRecognitionEngine:
                     "inliers": r["inliers"],
                     "ill_inliers": r.get("ill_inliers", 0),
                     "title_inliers": r.get("title_inliers", 0),
+                    "is_geom_valid": r.get("is_geom_valid", False),
                     "emb_score": 0.0,
                     "image_path": r["image_path"],
                 }
@@ -195,6 +196,7 @@ class CardRecognitionEngine:
                         "inliers": 0,
                         "ill_inliers": 0,
                         "title_inliers": 0,
+                        "is_geom_valid": False,
                         "emb_score": r["score"],
                         "image_path": r["image_path"],
                     }
@@ -204,19 +206,25 @@ class CardRecognitionEngine:
             for item in scores_map.values():
                 sift_s = item["sift_score"]
                 emb_s = item["emb_score"]
+                inl = item["inliers"]
                 ill_inl = item["ill_inliers"]
+                is_valid = item.get("is_geom_valid", False)
 
-                # イラストインライアが10個以上ある場合は、イラスト一致の確信度ボーナス
-                if ill_inl >= 10:
-                    combined = sift_s * 0.5 + emb_s * 0.5 + 10.0
+                # 幾何整合性の確信度に応じた動的アンサンブル重み付け
+                if is_valid and (inl >= 8 or ill_inl >= 5):
+                    # 幾何学的証明（ホモグラフィ妥当性＋高純度インライア）が得られている場合はSIFTを最優先
+                    combined = 50.0 + min(50.0, sift_s * 1.5) + (emb_s * 0.1)
+                elif inl >= 6:
+                    combined = 40.0 + min(40.0, sift_s * 1.0) + (emb_s * 0.2)
                 else:
-                    combined = sift_s * 0.3 + emb_s * 0.7
+                    # 幾何マッチが乏しい場合は色彩特徴量を参考
+                    combined = (emb_s * 0.5) + (sift_s * 0.2)
 
                 item["combined_score"] = combined
 
             candidates = sorted(
                 scores_map.values(),
-                key=lambda x: (x.get("combined_score", 0), x.get("ill_inliers", 0)),
+                key=lambda x: (x.get("is_geom_valid", False), x.get("inliers", 0) >= 8, x.get("combined_score", 0), x.get("inliers", 0)),
                 reverse=True,
             )[:top_k]
 

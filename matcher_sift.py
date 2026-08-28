@@ -12,10 +12,10 @@ from typing import List, Dict, Tuple, Optional
 
 
 class SIFTCardMatcher:
-    def __init__(self, max_features: int = 800, ratio_threshold: float = 0.75):
+    def __init__(self, max_features: int = 800, ratio_threshold: float = 0.70):
         """
         max_features: 各カード画像から抽出する最大特徴点数 (600〜800程度で高速かつ高精度)
-        ratio_threshold: Lowe's ratio test の閾値 (0.7〜0.75)
+        ratio_threshold: Lowe's ratio test の閾値 (0.70に厳格化して曖昧マッチを排除)
         """
         self.max_features = max_features
         self.ratio_threshold = ratio_threshold
@@ -23,11 +23,12 @@ class SIFTCardMatcher:
 
         # マスターカードの特徴量キャッシュ
         self.master_db: Dict[str, dict] = {}
-        
-        # 統合FLANNインデックス用キャッシュ
+
+        # 統合FLANNインデックス & TF-IDF用キャッシュ
         self.flann_index: Optional[cv2.flann_Index] = None
         self.all_des_matrix: Optional[np.ndarray] = None
         self.des_to_card_idx: Optional[np.ndarray] = None
+        self.des_idf_weights: Optional[np.ndarray] = None
         self.card_id_list: List[str] = []
         self._index_built = False
 
@@ -63,7 +64,10 @@ class SIFTCardMatcher:
         return False
 
     def build_unified_flann_index(self):
-        """全マスターカードの特徴点を1つの巨大KD-Treeインデックスに一括統合 (Fast SIFT Voting用)"""
+        """
+        全マスターカードの特徴点を1つの巨大KD-Treeインデックスに一括統合し、
+        各記述子の逆文書頻度 (IDF: 希少度重み) を事前計算する
+        """
         if not self.master_db or self._index_built:
             return
 
@@ -85,6 +89,25 @@ class SIFTCardMatcher:
             self.flann_index = cv2.flann_Index(
                 self.all_des_matrix, dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
             )
+
+            # TF-IDF (特徴点希少度重み) の計算 (未計算の場合のみ実行)
+            if self.des_idf_weights is None or len(self.des_idf_weights) != len(self.all_des_matrix):
+                n_cards = len(self.card_id_list)
+                try:
+                    indices, _ = self.flann_index.knnSearch(
+                        self.all_des_matrix, 15, params=dict(checks=32)
+                    )
+                    card_occurrences = []
+                    for row in indices:
+                        unique_cards = set(self.des_to_card_idx[idx] for idx in row if idx >= 0)
+                        card_occurrences.append(len(unique_cards))
+
+                    card_occurrences = np.array(card_occurrences, dtype=np.float32)
+                    idf = np.log((n_cards + 1.0) / (card_occurrences + 1.0)) + 1.0
+                    self.des_idf_weights = idf / max(1e-6, np.mean(idf))
+                except Exception:
+                    self.des_idf_weights = np.ones(len(self.all_des_matrix), dtype=np.float32)
+
             self._index_built = True
 
     def match(
@@ -92,13 +115,13 @@ class SIFTCardMatcher:
         query_image: np.ndarray,
         top_k: int = 5,
         target_card_ids: Optional[List[str]] = None,
-        coarse_top_n: int = 12,
+        coarse_top_n: int = 16,
     ) -> List[Dict]:
         """
-        Fast SIFT Voting による超高速・背景耐性照合:
-        1. 統合KD-Treeで全マスターに対する特徴点マッチングを1回で実行 (数ms〜数十ms)
-        2. 背景ノイズに埋もれず、カード部分の特徴点投票数が多い上位候補 (coarse_top_n) を選出
-        3. 上位候補に対してのみ RANSAC Homography 幾何検証を実行 (数百ms)
+        IDF加重 Fast SIFT Voting ＋ 厳格幾何検証による超高速・高精度照合:
+        1. 統合KD-Treeで一括 k-NN 探索 (20ms)
+        2. 全カード共通枠のノイズをIDF重みで無力化し、固有イラストの投票数上位候補を選出
+        3. 上位候補に対してのみ厳格な RANSAC 幾何検証 & 形状妥当性チェックを実行 (数百ms)
         """
         if not self.master_db:
             return []
@@ -115,9 +138,8 @@ class SIFTCardMatcher:
             q_des.astype(np.float32), 2, params=dict(checks=50)
         )
 
-        # Step 2: Lowe's Ratio Test & カード別マッチング蓄積
-        matches_by_card: Dict[str, List[Tuple[int, int]]] = {}
-        votes_by_card: Dict[str, int] = {}
+        # Step 2: Lowe's Ratio Test & IDF加重投票の集計
+        votes_by_card: Dict[str, float] = {}
 
         for q_idx in range(len(q_des)):
             d1, d2 = dists[q_idx][0], dists[q_idx][1]
@@ -129,30 +151,31 @@ class SIFTCardMatcher:
                 if target_card_ids is not None and cid not in target_card_ids:
                     continue
 
-                votes_by_card[cid] = votes_by_card.get(cid, 0) + 1
-                if cid not in matches_by_card:
-                    matches_by_card[cid] = []
-                matches_by_card[cid].append((q_idx, m_global_des_idx))
+                # IDF希少度重みによる加重投票 (共通枠の重みは小さく、固有イラストは3〜5倍)
+                idf_w = (
+                    float(self.des_idf_weights[m_global_des_idx])
+                    if self.des_idf_weights is not None
+                    else 1.0
+                )
+                votes_by_card[cid] = votes_by_card.get(cid, 0.0) + idf_w
 
         if not votes_by_card:
             return []
 
-        # 投票数上位候補を選出 (Coarse SIFT Selection)
+        # 投票スコア上位候補を選出 (Coarse SIFT Selection)
         sorted_candidates = sorted(votes_by_card.items(), key=lambda x: x[1], reverse=True)[
-            : max(coarse_top_n, top_k * 2)
+            : max(coarse_top_n, top_k * 3)
         ]
 
-        # Step 3: 上位候補に対してのみ RANSAC 幾何検証を実行 (Fine Verification)
+        # Step 3: 上位候補に対してのみ RANSAC 幾何検証 & 幾何妥当性チェック (Fine Verification)
         results = []
 
-        # 各カードのマスターデータ内でのローカルインデックス算出用マップ
-        for card_id, vote_count in sorted_candidates:
+        for card_id, vote_score in sorted_candidates:
             master_data = self.master_db[card_id]
             m_kp_data = master_data["kp_data"]
             m_des = master_data["des"]
 
-            # カード固有の単体マッチングを実行して確実なキーポイント対応を作成
-            # 投票で絞り込まれた上位候補のみなので超高速 (数ms/カード)
+            # カード固有の単体マッチング (厳格比率 0.70)
             flann_local = cv2.FlannBasedMatcher(
                 dict(algorithm=1, trees=4), dict(checks=32)
             )
@@ -170,25 +193,36 @@ class SIFTCardMatcher:
             ill_inliers = 0
             title_inliers = 0
             homography = None
+            is_geom_valid = False
 
             if len(good_matches) >= 6:
                 m_kp_pts = [p[0] for p in m_kp_data]
                 src_pts = np.float32([q_kp[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
                 dst_pts = np.float32([m_kp_pts[m.trainIdx] for m in good_matches]).reshape(-1, 1, 2)
 
-                H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                # RANSAC再投影誤差を 3.5px に厳格化
+                H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 3.5)
                 if mask is not None:
                     inliers_count = int(np.sum(mask))
                     homography = H
 
-                    h_m = master_data.get("shape", (840, 600))[0]
-                    for idx, is_inl in enumerate(mask.ravel()):
-                        if is_inl:
-                            y = dst_pts[idx][0][1]
-                            if 0.13 * h_m <= y <= 0.63 * h_m:
-                                ill_inliers += 1
-                            elif 0.04 * h_m <= y < 0.13 * h_m:
-                                title_inliers += 1
+                    # ホモグラフィの幾何形状妥当性チェック (凸四角形・アスペクト比・面積)
+                    m_shape = master_data.get("shape", (840, 600))
+                    est_c = self.estimate_corners_from_homography(m_shape, H)
+                    is_geom_valid = est_c is not None
+
+                    if is_geom_valid:
+                        h_m = m_shape[0]
+                        for idx, is_inl in enumerate(mask.ravel()):
+                            if is_inl:
+                                y = dst_pts[idx][0][1]
+                                if 0.13 * h_m <= y <= 0.63 * h_m:
+                                    ill_inliers += 1
+                                elif 0.04 * h_m <= y < 0.13 * h_m:
+                                    title_inliers += 1
+                    else:
+                        # 幾何学的にあり得ない歪んだ変換の場合はインライアをペナルティ
+                        inliers_count = int(inliers_count * 0.3)
             else:
                 inliers_count = len(good_matches)
 
@@ -196,8 +230,14 @@ class SIFTCardMatcher:
             common_inliers = max(0, inliers_count - ill_inliers - title_inliers)
             weighted_inliers = ill_inliers * 3.0 + title_inliers * 2.0 + common_inliers * 0.1
 
+            # インライア純度 (Purity) = インライア数 / GoodMatches数
+            purity = (inliers_count / max(1, len(good_matches))) if good_matches else 0.0
+            
+            # 正規化信頼度スコア (純度と幾何妥当性を反映)
             norm_factor = max(1.0, float(min(len(q_kp), len(m_des))))
-            confidence = (weighted_inliers / norm_factor) * 100.0
+            confidence = (weighted_inliers / norm_factor) * 100.0 * purity
+            if is_geom_valid and inliers_count >= 10:
+                confidence *= 1.2  # 幾何妥当性ボーナス
 
             results.append({
                 "card_id": card_id,
@@ -207,12 +247,17 @@ class SIFTCardMatcher:
                 "ill_inliers": ill_inliers,
                 "title_inliers": title_inliers,
                 "good_matches": len(good_matches),
-                "votes": vote_count,
+                "votes": float(vote_score),
+                "is_geom_valid": is_geom_valid,
                 "image_path": master_data.get("image_path"),
                 "homography": homography,
             })
 
-        results.sort(key=lambda x: (x["inliers"], x["score"]), reverse=True)
+        # 幾何妥当性、インライア数、純度スコアでソート
+        results.sort(
+            key=lambda x: (x["is_geom_valid"], x["inliers"] >= 10, x["score"], x["inliers"]),
+            reverse=True,
+        )
         return results[:top_k]
 
     @staticmethod
@@ -274,14 +319,27 @@ class SIFTCardMatcher:
             return None
 
     def save_index(self, filepath: str):
-        """マスターDBをファイルに保存"""
+        """マスターDBおよびTF-IDFインデックスをファイルに保存"""
+        self.build_unified_flann_index()
+        data = {
+            "master_db": self.master_db,
+            "des_idf_weights": self.des_idf_weights,
+            "card_id_list": self.card_id_list,
+        }
         with open(filepath, "wb") as f:
-            pickle.dump(self.master_db, f)
+            pickle.dump(data, f)
 
     def load_index(self, filepath: str) -> bool:
-        """マスターDBをファイルから読み込み"""
+        """マスターDBおよびTF-IDFインデックスをファイルから読み込み"""
         if os.path.exists(filepath):
             with open(filepath, "rb") as f:
-                self.master_db = pickle.load(f)
+                loaded = pickle.load(f)
+            if isinstance(loaded, dict) and "master_db" in loaded:
+                self.master_db = loaded["master_db"]
+                self.des_idf_weights = loaded.get("des_idf_weights")
+                self.card_id_list = loaded.get("card_id_list", [])
+            else:
+                self.master_db = loaded
+            self._index_built = False
             return True
         return False
