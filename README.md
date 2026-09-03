@@ -6,8 +6,9 @@
 
 ## 📚 ドキュメント
 
+- [**★ プロジェクト作業総合レポート (2026/08/14 〜 2026/09/04) (docs/WORK_REPORT_20260814_20260904.md)**](docs/WORK_REPORT_20260814_20260904.md) ★ 全作業概要・目的・時系列要旨
 - [**★ システム進化・改善史 総合ダッシュボード (docs/IMPROVEMENT_HISTORY.md)**](docs/IMPROVEMENT_HISTORY.md)
-  - Phase 1（速度改善）から Phase 4（失敗要因分析・90%目標）までの全時系列タイムラインと成果比較表
+  - Phase 1（速度改善）から Phase 4.2（90%目標達成）までの全時系列タイムラインと成果比較表
 
 ### 時系列の改善記録（Phase別）
 - [**Phase 4.2: 枠検出器 ConvexHull 凸包化による 90% 突破記録 (docs/06_phase4_accuracy_improvement_convexhull.md)**](docs/06_phase4_accuracy_improvement_convexhull.md) ★ 目標90%突破！
