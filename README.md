@@ -6,19 +6,26 @@
 
 ## 📚 ドキュメント
 
-- [**正答率向上計画書 Phase 3 (docs/ACCURACY_IMPROVEMENT_PHASE3.md)**](docs/ACCURACY_IMPROVEMENT_PHASE3.md) ★ NEW
-  - 正答率87.4%から95%超を達成するための残存エラー分析（暗所・低インライア・色彩逆転）と追加改善策の技術設計
-- [**性能改善記録: 2段階探索とTF-IDFによる高速化・高精度化 (docs/PERFORMANCE_IMPROVEMENT_COARSE_TO_FINE.md)**](docs/PERFORMANCE_IMPROVEMENT_COARSE_TO_FINE.md)
-  - 200枚マスターで33秒 $\rightarrow$ 約0.5秒（約60倍高速化）およびHubness問題を解決したTF-IDF加重の実装記録
+- [**★ システム進化・改善史 総合ダッシュボード (docs/IMPROVEMENT_HISTORY.md)**](docs/IMPROVEMENT_HISTORY.md)
+  - Phase 1（速度改善）から Phase 4（失敗要因分析・90%目標）までの全時系列タイムラインと成果比較表
+
+### 時系列の改善記録（Phase別）
+- [**Phase 4: 失敗事例の徹底要因分析と分類レポート (docs/04_phase4_pre_failure_analysis.md)**](docs/04_phase4_pre_failure_analysis.md) ★ NEW
+  - 全793枚の失敗92件を物理画質（ブレ・露出）と改善可能性に完全分類、90%達成へのロードマップ
+- [**Phase 3: 空間ROI重み超強化と幾何信頼度シグモイド (docs/03_phase3_geometric_scoring_and_roi.md)**](docs/03_phase3_geometric_scoring_and_roi.md)
+  - イラスト4.0倍/外枠0.05倍の空間ROI重み付け、暗所適応型RANSAC、中央80%クロップによる安定化記録
+- [**Phase 2: TF-IDF加重によるHubness問題の解消 (docs/02_phase2_tfidf_hubness_resolution.md)**](docs/02_phase2_tfidf_hubness_resolution.md)
+  - 共通外枠ノイズによる誤判定急落（49.4%）を記述子出現頻度（IDF）重み付けで解決（87.4%へ急上昇）
+- [**Phase 1: 2段階探索による高速化 (docs/01_phase1_speed_coarse_to_fine.md)**](docs/01_phase1_speed_coarse_to_fine.md)
+  - 200枚マスターで33秒 $\rightarrow$ 約0.9秒（約35倍高速化）を達成したCoarse-to-Fine投票の実装記録
+
+### 基本設計・技術解説
 - [**アルゴリズム設計・技術選定書 (docs/ALGORITHM_DESIGN.md)**](docs/ALGORITHM_DESIGN.md)
   - なぜ「ゼロからのディープラーニング学習」を避けたのか
   - 階層型ハイブリッド枠検出（Bottom-Up ＆ Top-Down SIFT逆射影）
   - 透視変換、SIFT幾何検証（RANSAC）、大局的特徴量の詳細数式・アルゴリズム解説
-  - GPUなし・数百枚規模に対する適合性評価
 - [**手持ち・黒縁カード検出改善レポート (docs/HANDHELD_CARD_DETECTION_IMPROVEMENT.md)**](docs/HANDHELD_CARD_DETECTION_IMPROVEMENT.md)
-  - 手持ち撮影・黒縁カードで枠検出が失敗していた原因調査と分析経緯
-  - 認識駆動型（Top-Down）枠検出への方針転換とホモグラフィ逆射影の実装
-  - 検出率 3.0% $\rightarrow$ 89.7%、Top-1正解率 94.9% の改善検証データ
+  - 手持ち撮影・黒縁カードで枠検出が失敗していた原因調査とTop-Down復元の導入
 
 ---
 
