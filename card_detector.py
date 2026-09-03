@@ -92,10 +92,10 @@ class CardDetector:
 
         card_contour = None
 
-        # 1. Canny法
-        edges = cv2.Canny(blurred, 50, 150)
+        # 1. Canny法 (エッジ強調)
+        edges = cv2.Canny(blurred, 30, 120)
         edges = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
-        card_contour = self._find_quad_contour(edges, min_area * (scale**2))
+        card_contour = self._find_quad_contour(edges, min_area * (scale**2), total_area * (scale**2) * 0.95)
 
         # 2. 失敗した場合は適応的二値化で再試行
         if card_contour is None:
@@ -107,14 +107,14 @@ class CardDetector:
                 11,
                 2,
             )
-            card_contour = self._find_quad_contour(thresh, min_area * (scale**2))
+            card_contour = self._find_quad_contour(thresh, min_area * (scale**2), total_area * (scale**2) * 0.95)
 
         # 3. それでも見つからない場合はOtsu二値化
         if card_contour is None:
             _, otsu = cv2.threshold(
                 blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
             )
-            card_contour = self._find_quad_contour(otsu, min_area * (scale**2))
+            card_contour = self._find_quad_contour(otsu, min_area * (scale**2), total_area * (scale**2) * 0.95)
 
         if card_contour is not None:
             # 元画像のスケールに戻す
@@ -131,9 +131,9 @@ class CardDetector:
             return cropped, None, {"detected": False, "reason": "No card quad found"}
 
     def _find_quad_contour(
-        self, binary_img: np.ndarray, min_area: float
+        self, binary_img: np.ndarray, min_area: float, max_area: float = 1e9
     ) -> Optional[np.ndarray]:
-        """二値画像から最大の4頂点凸輪郭を検出"""
+        """二値画像から ConvexHull 凸包・多段階近似・回転矩形フィッティングで4頂点輪郭を検出"""
         contours, _ = cv2.findContours(
             binary_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -143,11 +143,46 @@ class CardDetector:
             area = cv2.contourArea(cnt)
             if area < min_area:
                 break
+            if area > max_area:
+                continue
 
+            # Stage 1: 生輪郭の直接近似 (正方形〜長方形)
             peri = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+            for eps in [0.02, 0.03, 0.04]:
+                approx = cv2.approxPolyDP(cnt, eps * peri, True)
+                if len(approx) == 4 and cv2.isContourConvex(approx):
+                    rect = cv2.minAreaRect(approx)
+                    wb, hb = rect[1]
+                    if wb > 0 and hb > 0:
+                        asp = max(wb, hb) / min(wb, hb)
+                        if 1.15 <= asp <= 2.10:
+                            return approx
 
-            if len(approx) == 4 and cv2.isContourConvex(approx):
-                return approx
+            # Stage 2: ConvexHull (凸包) で手持ち指のかぶり・角丸の凹凸を修復
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            if hull_area < min_area or hull_area > max_area:
+                continue
+
+            h_peri = cv2.arcLength(hull, True)
+            for eps in [0.025, 0.035, 0.045, 0.055]:
+                approx_h = cv2.approxPolyDP(hull, eps * h_peri, True)
+                if len(approx_h) == 4 and cv2.isContourConvex(approx_h):
+                    rect = cv2.minAreaRect(approx_h)
+                    wb, hb = rect[1]
+                    if wb > 0 and hb > 0:
+                        asp = max(wb, hb) / min(wb, hb)
+                        if 1.15 <= asp <= 2.10:
+                            return approx_h
+
+            # Stage 3: minAreaRect 回転矩形フィッティング (指で輪郭が大きく削れている場合)
+            rect = cv2.minAreaRect(hull)
+            wb, hb = rect[1]
+            if wb > 0 and hb > 0:
+                asp = max(wb, hb) / min(wb, hb)
+                rect_area = wb * hb
+                if 1.18 <= asp <= 2.05 and (hull_area / rect_area) > 0.72:
+                    box = cv2.boxPoints(rect).astype(np.int32)
+                    return box.reshape(4, 1, 2)
 
         return None

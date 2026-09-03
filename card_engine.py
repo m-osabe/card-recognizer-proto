@@ -144,6 +144,16 @@ class CardRecognitionEngine:
                 query_orig, top_k=top_k * 2, coarse_top_n=max(32, top_k * 4)
             )
 
+            # もし元画像全体でのマッチが弱い場合（< 7点）、中央75%領域で背景ノイズを排除して再試行
+            if not sift_results or sift_results[0].get("inliers", 0) < 7:
+                qh, qw = query_orig.shape[:2]
+                center_crop = query_orig[int(0.12 * qh) : int(0.88 * qh), int(0.12 * qw) : int(0.88 * qw)]
+                center_sift = self.sift_matcher.match(
+                    center_crop, top_k=top_k * 2, coarse_top_n=max(32, top_k * 4)
+                )
+                if center_sift and (not sift_results or center_sift[0].get("inliers", 0) > sift_results[0].get("inliers", 0)):
+                    sift_results = center_sift
+
             # SIFTで有力な幾何マッチ（Homography）が存在する場合、四隅を逆算して正面化 (Top-Down)
             if sift_results and sift_results[0].get("homography") is not None:
                 top_match = sift_results[0]
