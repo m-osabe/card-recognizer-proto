@@ -10,7 +10,9 @@
   - Phase 1（速度改善）から Phase 4（失敗要因分析・90%目標）までの全時系列タイムラインと成果比較表
 
 ### 時系列の改善記録（Phase別）
-- [**Phase 4: 失敗事例の徹底要因分析と分類レポート (docs/04_phase4_pre_failure_analysis.md)**](docs/04_phase4_pre_failure_analysis.md) ★ NEW
+- [**Phase 4.1: 同型カード色相タイブレーカーとソート適正化 (docs/05_phase4_accuracy_improvement_90plus.md)**](docs/05_phase4_accuracy_improvement_90plus.md) ★ NEW
+  - card-6 vs card-7 の色相タイブレーカーと同型連動選出により正答率 89.0% へ向上（目標90%まであと8枚）
+- [**Phase 4: 失敗事例の徹底要因分析と分類レポート (docs/04_phase4_pre_failure_analysis.md)**](docs/04_phase4_pre_failure_analysis.md)
   - 全793枚の失敗92件を物理画質（ブレ・露出）と改善可能性に完全分類、90%達成へのロードマップ
 - [**Phase 3: 空間ROI重み超強化と幾何信頼度シグモイド (docs/03_phase3_geometric_scoring_and_roi.md)**](docs/03_phase3_geometric_scoring_and_roi.md)
   - イラスト4.0倍/外枠0.05倍の空間ROI重み付け、暗所適応型RANSAC、中央80%クロップによる安定化記録

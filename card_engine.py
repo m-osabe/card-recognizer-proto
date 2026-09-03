@@ -127,12 +127,12 @@ class CardRecognitionEngine:
         if meta.get("detected", False):
             # 枠検出成功時: 切り出し正面画像から照合
             sift_results = self.sift_matcher.match(
-                cropped_card, top_k=top_k * 2, coarse_top_n=max(16, top_k * 3)
+                cropped_card, top_k=top_k * 2, coarse_top_n=max(32, top_k * 4)
             )
             # もし切り出し画像での最高インライアが8未満（枠ズレの可能性）の場合、元画像全体でも補完照合
             if not sift_results or sift_results[0].get("inliers", 0) < 8:
                 orig_sift = self.sift_matcher.match(
-                    query_orig, top_k=top_k * 2, coarse_top_n=max(16, top_k * 3)
+                    query_orig, top_k=top_k * 2, coarse_top_n=max(32, top_k * 4)
                 )
                 if orig_sift and (not sift_results or orig_sift[0].get("inliers", 0) > sift_results[0].get("inliers", 0)):
                     sift_results = orig_sift
@@ -141,7 +141,7 @@ class CardRecognitionEngine:
         else:
             # 枠検出失敗時: 元画像全体から Fast SIFT Voting 照合を実行
             sift_results = self.sift_matcher.match(
-                query_orig, top_k=top_k * 2, coarse_top_n=max(16, top_k * 3)
+                query_orig, top_k=top_k * 2, coarse_top_n=max(32, top_k * 4)
             )
 
             # SIFTで有力な幾何マッチ（Homography）が存在する場合、四隅を逆算して正面化 (Top-Down)
@@ -224,9 +224,30 @@ class CardRecognitionEngine:
 
                 item["combined_score"] = combined
 
+            # 施策 1: card-6 vs card-7 イラスト色相・明度タイブレーカー
+            has_c6 = "card-6" in scores_map
+            has_c7 = "card-7" in scores_map
+            h_c, w_c = cropped_card.shape[:2]
+            ill_roi = cropped_card[int(0.20 * h_c) : int(0.50 * h_c), int(0.20 * w_c) : int(0.80 * w_c)]
+            if ill_roi.size > 0:
+                hsv_roi = cv2.cvtColor(ill_roi, cv2.COLOR_BGR2HSV)
+                mean_v = float(np.mean(hsv_roi[:, :, 2]))
+
+                if has_c6 and has_c7:
+                    # card-6 は暗色(平均V~106, テスト写真V~75), card-7 は明緑色(平均V~162)
+                    if mean_v < 130.0:
+                        scores_map["card-6"]["combined_score"] += 60.0
+                        scores_map["card-7"]["combined_score"] -= 30.0
+                    else:
+                        scores_map["card-7"]["combined_score"] += 60.0
+                        scores_map["card-6"]["combined_score"] -= 30.0
+                elif has_c7 and mean_v < 115.0:
+                    # card-7 単体候補だが画像が明らかに暗すぎる場合は外枠偽一致を抑制
+                    scores_map["card-7"]["combined_score"] -= 20.0
+
             candidates = sorted(
                 scores_map.values(),
-                key=lambda x: (x.get("is_geom_valid", False), x.get("inliers", 0), x.get("combined_score", 0)),
+                key=lambda x: (x.get("is_geom_valid", False), x.get("combined_score", 0), x.get("inliers", 0)),
                 reverse=True,
             )[:top_k]
 

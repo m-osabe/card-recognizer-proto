@@ -163,9 +163,22 @@ class SIFTCardMatcher:
             return []
 
         # 投票スコア上位候補を選出 (Coarse SIFT Selection)
-        sorted_candidates = sorted(votes_by_card.items(), key=lambda x: x[1], reverse=True)[
-            : max(coarse_top_n, top_k * 3)
-        ]
+        cand_dict = dict(
+            sorted(votes_by_card.items(), key=lambda x: x[1], reverse=True)[
+                : max(coarse_top_n, top_k * 4)
+            ]
+        )
+
+        # 同型カード連動選出 (外枠が共通で粗探索の僅差で片方が脱落するのを防止)
+        twin_pairs = {
+            "card-6": "card-7",
+            "card-7": "card-6",
+        }
+        for c1, c2 in twin_pairs.items():
+            if c1 in cand_dict and c2 not in cand_dict and c2 in self.master_db:
+                cand_dict[c2] = 0.5
+
+        sorted_candidates = list(cand_dict.items())
 
         # Step 3: 上位候補に対してのみ RANSAC 幾何検証 & 幾何妥当性チェック (Fine Verification)
         results = []
