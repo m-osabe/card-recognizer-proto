@@ -129,13 +129,32 @@ class CardRecognitionEngine:
             sift_results = self.sift_matcher.match(
                 cropped_card, top_k=top_k * 2, coarse_top_n=max(32, top_k * 4)
             )
-            # もし切り出し画像での最高インライアが8未満（枠ズレの可能性）の場合、元画像全体でも補完照合
-            if not sift_results or sift_results[0].get("inliers", 0) < 8:
+            crop_inl = sift_results[0].get("inliers", 0) if sift_results else 0
+
+            # もし切り出し画像での最高インライアが10未満の場合、枠ズレ・偽枠の可能性を検証
+            if crop_inl < 10:
                 orig_sift = self.sift_matcher.match(
                     query_orig, top_k=top_k * 2, coarse_top_n=max(32, top_k * 4)
                 )
-                if orig_sift and (not sift_results or orig_sift[0].get("inliers", 0) > sift_results[0].get("inliers", 0)):
+                orig_inl = orig_sift[0].get("inliers", 0) if orig_sift else 0
+
+                # 元画像全体の方が有意に高いインライアを出した場合 (偽陽性枠と判定)
+                if orig_sift and orig_inl > max(crop_inl, 6):
                     sift_results = orig_sift
+                    if orig_sift[0].get("homography") is not None:
+                        top_match = orig_sift[0]
+                        master_data = self.sift_matcher.master_db.get(top_match["card_id"])
+                        if master_data:
+                            m_shape = master_data.get("shape", (self.detector.target_height, self.detector.target_width))
+                            est_corners = self.sift_matcher.estimate_corners_from_homography(
+                                m_shape, top_match["homography"], scale=(1.0 / scale)
+                            )
+                            if est_corners is not None:
+                                corners = est_corners
+                                cropped_card = four_point_transform(
+                                    orig_img, corners, (self.detector.target_width, self.detector.target_height)
+                                )
+                                meta["detection_method"] = "top_down_sift_corrected"
 
             emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
         else:
@@ -275,6 +294,8 @@ class CardRecognitionEngine:
 
         return {
             "detected": meta.get("detected", False),
+            "corners": corners,
+            "meta": meta,
             "candidates": candidates,
             "best_match": best_match,
             "visual_result_path": visual_path,
