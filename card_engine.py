@@ -18,7 +18,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from card_detector import CardDetector, four_point_transform
+from card_detector import CardDetector, four_point_transform, order_points
 from matcher_sift import SIFTCardMatcher
 from matcher_embedding import EmbeddingCardMatcher
 
@@ -155,6 +155,42 @@ class CardRecognitionEngine:
                                     orig_img, corners, (self.detector.target_width, self.detector.target_height)
                                 )
                                 meta["detection_method"] = "top_down_sift_corrected"
+
+            # SIFTの幾何整合ホモグラフィから四隅をピクセル精度で精緻化（コーナー自動吸着）
+            if (
+                sift_results
+                and sift_results[0].get("is_geom_valid", False)
+                and sift_results[0].get("inliers", 0) >= 8
+                and sift_results[0].get("homography") is not None
+                and corners is not None
+                and meta.get("detection_method") != "top_down_sift_corrected"
+            ):
+                top_match = sift_results[0]
+                master_data = self.sift_matcher.master_db.get(top_match["card_id"])
+                if master_data:
+                    m_shape = master_data.get("shape", (self.detector.target_height, self.detector.target_width))
+                    est_c = self.sift_matcher.estimate_corners_from_homography(m_shape, top_match["homography"])
+                    if est_c is not None:
+                        ideal_c = np.array(
+                            [
+                                [0, 0],
+                                [self.detector.target_width - 1, 0],
+                                [self.detector.target_width - 1, self.detector.target_height - 1],
+                                [0, self.detector.target_height - 1],
+                            ],
+                            dtype="float32",
+                        )
+                        diff = np.mean(np.linalg.norm(est_c - ideal_c, axis=1))
+                        if diff < 90.0:
+                            ordered_corners = order_points(corners)
+                            H_c2orig = cv2.getPerspectiveTransform(ideal_c, ordered_corners)
+                            snapped_corners = cv2.perspectiveTransform(est_c.reshape(-1, 1, 2), H_c2orig).reshape(4, 2)
+                            corners = order_points(snapped_corners)
+                            cropped_card = four_point_transform(
+                                orig_img, corners, (self.detector.target_width, self.detector.target_height)
+                            )
+                            meta["corners"] = corners.tolist()
+                            meta["corner_refined"] = True
 
             emb_results = self.emb_matcher.match(cropped_card, top_k=top_k * 2)
         else:

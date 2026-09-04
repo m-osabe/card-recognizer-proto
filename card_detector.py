@@ -5,6 +5,7 @@ card_detector.py
 
 import cv2
 import numpy as np
+from itertools import combinations
 from typing import Tuple, Optional, List
 
 
@@ -121,6 +122,17 @@ class CardDetector:
             )
             card_contour = self._find_quad_contour(otsu, min_area * (scale**2), max_area * (scale**2), sw, sh)
 
+        # 4. それでも見つからない場合は複合輪郭から長方形サブセット探索 (手持ち腕・指の合体輪郭からカード四隅を救済)
+        if card_contour is None:
+            cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+            for cnt in cnts[:3]:
+                if cv2.contourArea(cnt) >= min_area * (scale**2) * 0.5:
+                    sub_quad = self._find_sub_quadrilateral(cnt, min_area * (scale**2), max_area * (scale**2), sw, sh)
+                    if sub_quad is not None:
+                        card_contour = sub_quad
+                        break
+
         if card_contour is not None:
             # 元画像のスケールに戻す
             corners = (card_contour.reshape(4, 2) / scale).astype("float32")
@@ -188,6 +200,76 @@ class CardDetector:
                     box = cv2.boxPoints(rect).astype(np.int32).reshape(4, 1, 2)
                     if not self._is_touching_image_border(box, img_w, img_h):
                         return box
+
+        return None
+
+    def _find_sub_quadrilateral(
+        self, cnt: np.ndarray, min_area: float, max_area: float, img_w: int, img_h: int
+    ) -> Optional[np.ndarray]:
+        """複合輪郭（腕・指などが合体した輪郭）の多角形頂点群からカード長方形を探索"""
+        peri = cv2.arcLength(cnt, True)
+        for eps_ratio in [0.012, 0.018]:
+            approx = cv2.approxPolyDP(cnt, eps_ratio * peri, True)
+            pts = approx.reshape(-1, 2)
+            if len(pts) < 4 or len(pts) > 25:
+                continue
+
+            best_score = -1e9
+            best_quad = None
+
+            for quad_idx in combinations(range(len(pts)), 4):
+                q = pts[list(quad_idx)].astype("float32")
+                if not cv2.isContourConvex(q.astype(np.int32)):
+                    continue
+                ordered = order_points(q)
+                w1 = np.linalg.norm(ordered[0] - ordered[1])
+                w2 = np.linalg.norm(ordered[3] - ordered[2])
+                h1 = np.linalg.norm(ordered[0] - ordered[3])
+                h2 = np.linalg.norm(ordered[1] - ordered[2])
+                w = (w1 + w2) / 2.0
+                h = (h1 + h2) / 2.0
+                if w < 40 or h < 40:
+                    continue
+                asp = max(w, h) / (min(w, h) + 1e-5)
+                if not (1.20 <= asp <= 1.65):
+                    continue
+                area = cv2.contourArea(ordered.astype(np.int32))
+                if area < min_area * 0.5 or area > max_area:
+                    continue
+
+                if self._is_touching_image_border(ordered, img_w, img_h):
+                    continue
+
+                # 4つの内角の直交性チェック (90度との平均誤差)
+                def angle(p1, p2, p3):
+                    v1 = p1 - p2
+                    v2 = p3 - p2
+                    cos = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-5)
+                    return np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+
+                a1 = angle(ordered[3], ordered[0], ordered[1])
+                a2 = angle(ordered[0], ordered[1], ordered[2])
+                a3 = angle(ordered[1], ordered[2], ordered[3])
+                a4 = angle(ordered[2], ordered[3], ordered[0])
+                angle_err = (abs(a1 - 90) + abs(a2 - 90) + abs(a3 - 90) + abs(a4 - 90)) / 4.0
+                if angle_err > 14:
+                    continue
+
+                # 平行四辺形整合性チェック (対辺の平行度)
+                br_exp = ordered[3] + (ordered[1] - ordered[0])
+                dist_br = np.linalg.norm(ordered[2] - br_exp)
+
+                score = area - angle_err * 250 - dist_br * 30
+                if score > best_score:
+                    best_score = score
+                    best_quad = ordered
+
+            if best_quad is not None:
+                # 幾何正則化: 右下頂点が指のふくらみ等で外側に突出している場合、平行四辺形補完で補正
+                br_exp = best_quad[3] + (best_quad[1] - best_quad[0])
+                if np.linalg.norm(best_quad[2] - br_exp) > 5.0:
+                    best_quad[2] = br_exp
+                return best_quad.reshape(4, 1, 2).astype(np.int32)
 
         return None
 

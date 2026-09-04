@@ -31,6 +31,9 @@ timeline
     section Phase 4.2 (施策②完了・目標達成！)
       施策 : 枠検出器 ConvexHull 凸包導入 & クロップ探索フォールバック
       成果 : 正答率 89.0% → 90.8% (720/793, 目標90%突破！)
+    section Phase 4.3 (手持ち複合輪郭・コーナー精緻化)
+      施策 : 複合輪郭長方形探索 (Stage 4) & 平行四辺形正則化 & SIFTコーナー微調整
+      成果 : 正答率 90.8% → 92.6% (734/793, +14枚向上！)
 ```
 
 ---
@@ -44,7 +47,8 @@ timeline
 | **Phase 3** | **同系色競合 ＆ 暗所不発**<br>(card-6, card-10 の失敗) | 階段状スコア閾値による急落、机の背景色混入、共通外枠ノイズ | **空間ROI重み付け超強化** (イラスト4.0倍/外枠0.05倍)、**暗所適応型RANSAC**、中央80%クロップ | **0.54s** | 87.4% $\rightarrow$ **88.4%**<br>(701/793) | [**Phase 3 詳細**](03_phase3_geometric_scoring_and_roi.md) |
 | **Phase 4**<br>*(事前調査)* | **残存エラー92件の分類**<br>(90%突破への阻害要因特定) | 入力画像の物理的破損（ブレ・ピンボケ）と、アルゴリズムで救済可能な要因の未整理 | 全793枚の失敗92件を**「入力起因 21件 (22.8%)」**と**「ロジック改善可能 71件 (77.2%)」**に完全分類 | **0.89s**<br>(画質分析込) | **88.4% (改善前ベースライン確定)** | [**Phase 4 事前調査**](04_phase4_pre_failure_analysis.md) |
 | **Phase 4.1** | **同型カード競合の解消**<br>(card-6 vs card-7) | 外枠75点共通による逆転、インライア優先ソート、粗探索の足切り | **イラスト色相・明度タイブレーカー**、同型カード連動選出、`combined_score` 優先ソート | **0.50s 前後** | 88.4% $\rightarrow$ **89.0%**<br>(706/793) | [**Phase 4.1 詳細**](05_phase4_accuracy_improvement_90plus.md) |
-| **Phase 4.2**<br>*(現在)* | **手持ち枠検出全滅の救済**<br>(card-6, card-10) | 指かぶりによる窪み・角丸で4頂点近似が全滅、背景机ノイズ混入 | **枠検出器への ConvexHull 凸包導入** (多段階近似/回転矩形) ＆ 中央クロップフォールバック | **0.86s**<br>(全探索込) | **89.0% $\rightarrow$ 90.8%**<br>(720/793, **目標90%突破！**) | [**Phase 4.2 詳細**](06_phase4_accuracy_improvement_convexhull.md) ★ |
+| **Phase 4.2** | **手持ち枠検出全滅の救済**<br>(card-6, card-10) | 指かぶりによる窪み・角丸で4頂点近似が全滅、背景机ノイズ混入 | **枠検出器への ConvexHull 凸包導入** (多段階近似/回転矩形) ＆ 中央クロップフォールバック | **0.86s** | 89.0% $\rightarrow$ **90.8%**<br>(720/793, **目標90%突破！**) | [**Phase 4.2 詳細**](06_phase4_accuracy_improvement_convexhull.md) |
+| **Phase 4.3**<br>*(最新)* | **手持ち腕癒着 ＆ 指ふくらみ**<br>(card-10 の手持ち撮影) | カード外枠と手・腕のエッジが合体しアスペクト比超過で棄却、指外縁への角ズレ | **複合輪郭からの長方形サブセット探索 (Stage 4)**、**平行四辺形正則化**、**SIFTホモグラフィ四隅逆投影** | **0.63s**<br>(約27%高速化) | **90.8% $\rightarrow$ 92.6%**<br>(734/793, **+14枚大幅向上！**) | [**Phase 4.3 詳細**](07_phase4_accuracy_improvement_subquad_refinement.md) ★ |
 
 ---
 
@@ -58,9 +62,15 @@ timeline
    - 200枚マスターでの Hubness問題解消と TF-IDF加重による正答率急上昇（49.4% $\rightarrow$ 87.4%）
 3. [**`03_phase3_geometric_scoring_and_roi.md`**](03_phase3_geometric_scoring_and_roi.md)
    - 空間ROI重み付け超強化（イラスト4.0倍/外枠0.05倍）、暗所適応型RANSAC、中央クロップの実装記録
-4. [**`04_phase4_pre_failure_analysis.md`**](04_phase4_pre_failure_analysis.md) ★ 今回の調査記録
+4. [**`04_phase4_pre_failure_analysis.md`**](04_phase4_pre_failure_analysis.md)
    - 失敗92件の物理画質（Laplacianブレ・露出）と認識動作の徹底分析、入力起因（21件）vs 改善可能（71件）の完全分類
-5. [**`ALGORITHM_DESIGN.md`**](ALGORITHM_DESIGN.md)
+5. [**`05_phase4_accuracy_improvement_90plus.md`**](05_phase4_accuracy_improvement_90plus.md)
+   - 同型カード色相タイブレーカー・連動選出による精度向上（88.4% $\rightarrow$ 89.0%）
+6. [**`06_phase4_accuracy_improvement_convexhull.md`**](06_phase4_accuracy_improvement_convexhull.md)
+   - 枠検出器 ConvexHull 凸包化による目標90%突破（89.0% $\rightarrow$ 90.8%）
+7. [**`07_phase4_accuracy_improvement_subquad_refinement.md`**](07_phase4_accuracy_improvement_subquad_refinement.md) ★ 最新
+   - 複合輪郭長方形探索・指ふくらみ幾何正則化・SIFTコーナー微調整による精度向上（90.8% $\rightarrow$ 92.6%）
+8. [**`ALGORITHM_DESIGN.md`**](ALGORITHM_DESIGN.md)
    - システム全体のアーキテクチャ・技術選定理由・基本設計書
-6. [**`HANDHELD_CARD_DETECTION_IMPROVEMENT.md`**](HANDHELD_CARD_DETECTION_IMPROVEMENT.md)
+9. [**`HANDHELD_CARD_DETECTION_IMPROVEMENT.md`**](HANDHELD_CARD_DETECTION_IMPROVEMENT.md)
    - 手持ちカード撮影・背景分離のための枠検出パイプライン設計書
