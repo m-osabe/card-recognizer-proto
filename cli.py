@@ -66,30 +66,42 @@ def cmd_identify(args, engine: CardRecognitionEngine):
         method=args.method,
         top_k=args.top_k,
         save_visual_result=True,
+        reject_unknown=not getattr(args, "no_reject", False),
     )
     elapsed = (time.time() - start_t) * 1000
 
     print(f"処理時間: {elapsed:.1f} ms")
     print(f"カード領域検出: {'[OK] 成功' if result['detected'] else '[NG] 検出できず（全体をフォールバック使用）'}")
-    print("\n【判定結果 - 上位候補】")
+    print(f"判定ステータス: {result.get('status', 'UNKNOWN')}")
 
-    candidates = result.get("candidates", [])
-    if not candidates:
-        print("一致するカードが見つかりませんでした。")
-        return
+    if result.get("best_match") is None:
+        print(f"\n[!] 安全棄却（MISS判定）: カードを同定できませんでした")
+        if result.get("rejection_reason"):
+            print(f"   理由      : {result['rejection_reason']}")
+        if result.get("guidance"):
+            print(f"   ガイダンス: {result['guidance']}")
+        cands = result.get("candidates", [])
+        if cands:
+            print(f"\n【参考情報: 最も近い候補（確信度不足のため未確定）】")
+            print(f"   カード名  : {cands[0]['name']} (ID: {cands[0]['card_id']})")
+            print(f"   スコア    : {cands[0].get('combined_score', 0):.1f}点 (一致点: {cands[0].get('inliers', 0)})")
+    else:
+        print("\n【判定結果 - 上位候補】")
+        candidates = result.get("candidates", [])
+        for rank, cand in enumerate(candidates, 1):
+            name = cand["name"]
+            cid = cand["card_id"]
+            inliers = cand.get("inliers", 0)
+            emb_s = cand.get("emb_score", 0.0)
+            comb_s = cand.get("combined_score", cand.get("score", 0.0))
 
-    for rank, cand in enumerate(candidates, 1):
-        name = cand["name"]
-        cid = cand["card_id"]
-        inliers = cand.get("inliers", 0)
-        sift_s = cand.get("sift_score", cand.get("score", 0.0))
-        emb_s = cand.get("emb_score", 0.0)
-        comb_s = cand.get("combined_score", cand.get("score", 0.0))
+            star = "[*] [Top-1 Best Match]" if rank == 1 else f"    [候補 {rank}]"
+            print(f"{star}")
+            print(f"   カード名  : {name} (ID: {cid})")
+            print(f"   総合スコア: {comb_s:.1f}点 (SIFTインライア数: {inliers}, 特徴類似度: {emb_s:.1f}%)")
 
-        star = "[*] [Top-1 Best Match]" if rank == 1 else f"    [候補 {rank}]"
-        print(f"{star}")
-        print(f"   カード名 : {name} (ID: {cid})")
-        print(f"   総合スコア: {comb_s:.1f}点 (SIFTインライア数: {inliers}, 特徴類似度: {emb_s:.1f}%)")
+        if result.get("guidance"):
+            print(f"\n[INFO] {result['guidance']}")
 
     if result.get("visual_result_path"):
         print("\n[INFO] 照合結果の比較画像を保存しました:")
@@ -199,6 +211,7 @@ def main():
     p_id.add_argument("image", type=str, help="判定したい写真のパス")
     p_id.add_argument("--method", type=str, default="ensemble", choices=["ensemble", "sift", "embedding"], help="照合手法")
     p_id.add_argument("--top-k", type=int, default=3, help="上位候補の表示数")
+    p_id.add_argument("--no-reject", action="store_true", help="確信度不足時の安全棄却を無効化し、強制的にTop-1を返す（旧動作）")
 
     # evaluate
     p_eval = subparsers.add_parser("evaluate", help="テスト画像フォルダを一括評価")

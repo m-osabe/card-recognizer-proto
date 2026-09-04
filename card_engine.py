@@ -23,6 +23,26 @@ from matcher_sift import SIFTCardMatcher
 from matcher_embedding import EmbeddingCardMatcher
 
 
+def analyze_image_quality(img_bgr: np.ndarray) -> dict:
+    """画像の物理的品質（ブレ、輝度、白飛び、黒潰れなど）を計算"""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+    laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    mean_bright = float(np.mean(gray))
+    std_bright = float(np.std(gray))
+    overexp_ratio = float(np.sum(gray >= 245) / (h * w))
+    underexp_ratio = float(np.sum(gray <= 15) / (h * w))
+    return {
+        "width": w,
+        "height": h,
+        "laplacian_var": round(laplacian_var, 1),
+        "mean_brightness": round(mean_bright, 1),
+        "std_brightness": round(std_bright, 1),
+        "overexp_ratio": round(overexp_ratio, 4),
+        "underexp_ratio": round(underexp_ratio, 4),
+    }
+
+
 class CardRecognitionEngine:
     def __init__(self, data_dir: str = "data", output_dir: str = "output"):
         self.data_dir = Path(data_dir)
@@ -91,6 +111,7 @@ class CardRecognitionEngine:
         top_k: int = 3,
         save_visual_result: bool = True,
         result_filename: Optional[str] = None,
+        reject_unknown: bool = True,
     ) -> Dict:
         """
         1枚の写真からカードを検出して識別を行う。
@@ -99,11 +120,19 @@ class CardRecognitionEngine:
             method: 'sift', 'embedding', 'ensemble' (デフォルト: アンサンブル)
             top_k: 返す上位候補数
             save_visual_result: 判定結果の比較画像を保存するかどうか
+            result_filename: 保存ファイル名の指定 (Optional)
+            reject_unknown: 確信度が不足している場合や品質不良時に安全棄却(best_match=None)するかどうか
         Returns:
             Dict: {
                 'detected': bool,
+                'corners': np.ndarray,
+                'meta': dict,
                 'candidates': List[dict],
-                'best_match': dict,
+                'best_match': Optional[dict],
+                'status': str ('CONFIDENT', 'LOW_CONFIDENCE', 'UNKNOWN_CARD', 'QUALITY_POOR', 'NO_CARD_FOUND'),
+                'is_confident': bool,
+                'rejection_reason': Optional[str],
+                'guidance': Optional[str],
                 'visual_result_path': Optional[str]
             }
         """
@@ -116,8 +145,46 @@ class CardRecognitionEngine:
             orig_img = image_input.copy()
             input_name = "query_image"
 
+        # 0. 画像の物理的品質（ブレ、反射等）の分析
+        quality = analyze_image_quality(orig_img)
+
+        # Gate 1: 物理的品質の事前チェック（極端なブレ、強烈な白飛び）
+        is_severe_blur = quality["laplacian_var"] < 20.0
+        is_severe_glare = quality["overexp_ratio"] > 0.08
+
+        if (is_severe_blur or is_severe_glare) and reject_unknown:
+            if is_severe_blur:
+                reason = f"画像が極度にぼやけています (鮮鋭度: {quality['laplacian_var']} < 20.0)"
+                guidance = "カメラのピントをカードに合わせて、手ブレしないように撮影してください。"
+            else:
+                reason = f"照明の反射（白飛び）が強すぎます (白飛び率: {quality['overexp_ratio']*100:.1f}% > 8.0%)"
+                guidance = "スリーブやカード表面に光が反射しないよう、角度を調節して撮影してください。"
+
+            visual_path = None
+            if save_visual_result:
+                visual_img = self._create_visual_report(
+                    orig_img, None, orig_img, None, [], status="QUALITY_POOR", reason=reason
+                )
+                out_name = result_filename or f"result_{input_name}.jpg"
+                visual_path = str(self.output_dir / out_name)
+                cv2.imwrite(visual_path, visual_img)
+
+            return {
+                "detected": False,
+                "corners": None,
+                "meta": {"quality": quality, "detection_method": "none"},
+                "candidates": [],
+                "best_match": None,
+                "status": "QUALITY_POOR",
+                "is_confident": False,
+                "rejection_reason": reason,
+                "guidance": guidance,
+                "visual_result_path": visual_path,
+            }
+
         # 1. カード領域の自動検出 & 透視変換（Bottom-Up）
         cropped_card, corners, meta = self.detector.detect_and_crop(orig_img)
+        meta["quality"] = quality
 
         # 2. 各マッチャーでスコアリング (Fast SIFT Voting + RANSAC 2段階探索)
         orig_h, orig_w = orig_img.shape[:2]
@@ -316,13 +383,70 @@ class CardRecognitionEngine:
                 reverse=True,
             )[:top_k]
 
-        best_match = candidates[0] if candidates else None
+        top1 = candidates[0] if candidates else None
+        top1_score = top1.get("combined_score", top1.get("score", 0.0)) if top1 else 0.0
+        top1_inl = top1.get("inliers", 0) if top1 else 0
+        top1_gv = top1.get("is_geom_valid", False) if top1 else False
+        is_detected = meta.get("detected", False)
+
+        status = "UNKNOWN_CARD"
+        is_confident = False
+        rejection_reason = None
+        guidance = None
+        best_match = None
+
+        # Gate 2 & Gate 3: 確信度・幾何整合性・マージン判定
+        if top1 is not None and top1_gv and top1_inl >= 6 and top1_score >= 60.0:
+            status = "CONFIDENT"
+            is_confident = True
+            best_match = top1
+        elif top1 is not None and ((top1_inl >= 4 and top1_score >= 50.0) or top1_score >= 65.0):
+            # Top-1 と Top-2 の差（マージン）をチェック
+            is_ambiguous = False
+            top2_score = 0.0
+            if len(candidates) >= 2 and top1_inl < 6:
+                top2_score = candidates[1].get("combined_score", candidates[1].get("score", 0.0))
+                if (top1_score - top2_score) < 5.0:
+                    is_ambiguous = True
+
+            if not is_ambiguous:
+                status = "LOW_CONFIDENCE"
+                is_confident = True
+                best_match = top1
+                guidance = "カードを特定しましたが確信度がやや低めです。より鮮明に撮影すると精度が向上します。"
+            else:
+                status = "UNKNOWN_CARD"
+                is_confident = False
+                rejection_reason = f"複数カードの候補が僅差で競合しており一意に特定できません (Top1: {top1['name']} ({top1_score:.1f}) vs Top2: {candidates[1]['name']} ({top2_score:.1f}))"
+                guidance = "より正面からカード全体がはっきりと写るように撮影してください。"
+        else:
+            # 確信度が不足している場合
+            if not is_detected and top1_inl < 4:
+                status = "NO_CARD_FOUND"
+                is_confident = False
+                rejection_reason = "画像内からカードの輪郭および有効な特徴点を検出できませんでした。"
+                guidance = "カード全体が背景と区別できるように配置し、画角内に収めて撮影してください。"
+            else:
+                status = "UNKNOWN_CARD"
+                is_confident = False
+                rejection_reason = f"登録カードデータベースに一致する特徴が見つかりませんでした (最高一致点: {top1_inl}点, 確信スコア: {top1_score:.1f})"
+                guidance = "対象シリーズの表面が写っていることを確認してください。未登録カードまたは他社カードの可能性があります。"
+
+        # reject_unknown が False の場合（後方互換性 / クローズド環境での強制Top-1）
+        if not reject_unknown:
+            best_match = top1
 
         # 4. 可視化画像の生成
         visual_path = None
-        if save_visual_result and best_match:
+        if save_visual_result:
             visual_img = self._create_visual_report(
-                orig_img, corners, cropped_card, best_match, candidates
+                orig_img,
+                corners,
+                cropped_card,
+                best_match if best_match is not None else (candidates[0] if candidates else None),
+                candidates,
+                status=status,
+                reason=rejection_reason,
             )
             out_name = result_filename or f"result_{input_name}.jpg"
             visual_path = str(self.output_dir / out_name)
@@ -334,6 +458,10 @@ class CardRecognitionEngine:
             "meta": meta,
             "candidates": candidates,
             "best_match": best_match,
+            "status": status,
+            "is_confident": is_confident,
+            "rejection_reason": rejection_reason,
+            "guidance": guidance,
             "visual_result_path": visual_path,
         }
 
@@ -342,8 +470,10 @@ class CardRecognitionEngine:
         orig_img: np.ndarray,
         corners: Optional[np.ndarray],
         cropped_card: np.ndarray,
-        best_match: dict,
+        best_match: Optional[dict],
         candidates: List[dict],
+        status: str = "CONFIDENT",
+        reason: Optional[str] = None,
     ) -> np.ndarray:
         """
         写真、検出カード、正解マスター画像を横に並べた見やすい比較レポート画像を生成
@@ -352,8 +482,9 @@ class CardRecognitionEngine:
         annotated_orig = orig_img.copy()
         if corners is not None:
             pts = corners.astype(int)
-            cv2.polylines(annotated_orig, [pts], True, (0, 255, 0), 4)
-            for i, p in enumerate(pts):
+            box_color = (0, 255, 0) if status in ("CONFIDENT", "LOW_CONFIDENCE") else (0, 165, 255)
+            cv2.polylines(annotated_orig, [pts], True, box_color, 4)
+            for p in pts:
                 cv2.circle(annotated_orig, tuple(p), 8, (0, 0, 255), -1)
 
         # リサイズして高さを統一 (500px)
@@ -362,39 +493,64 @@ class CardRecognitionEngine:
         p1 = cv2.resize(annotated_orig, (w_orig, h_target))
 
         # パネル2: 検出・補正されたカード正面画像
-        w_crop = int(cropped_card.shape[1] * (h_target / cropped_card.shape[0]))
-        p2 = cv2.resize(cropped_card, (w_crop, h_target))
-
-        # パネル3: マッチしたマスター画像
-        master_path = best_match.get("image_path")
-        if master_path and os.path.exists(master_path):
-            m_img = cv2.imread(master_path)
-            w_m = int(m_img.shape[1] * (h_target / m_img.shape[0]))
-            p3 = cv2.resize(m_img, (w_m, h_target))
+        if cropped_card is not None and cropped_card.shape[0] > 0 and cropped_card.shape[1] > 0:
+            w_crop = int(cropped_card.shape[1] * (h_target / cropped_card.shape[0]))
+            p2 = cv2.resize(cropped_card, (w_crop, h_target))
         else:
-            p3 = np.zeros((h_target, 350, 3), dtype=np.uint8)
+            p2 = np.zeros((h_target, 350, 3), dtype=np.uint8)
+
+        # パネル3: マッチしたマスター画像 または 棄却パネル
+        p3_w = 350
+        if status in ("CONFIDENT", "LOW_CONFIDENCE") and best_match:
+            master_path = best_match.get("image_path")
+            if master_path and os.path.exists(master_path):
+                m_img = cv2.imread(master_path)
+                p3_w = int(m_img.shape[1] * (h_target / m_img.shape[0]))
+                p3 = cv2.resize(m_img, (p3_w, h_target))
+            else:
+                p3 = np.zeros((h_target, 350, 3), dtype=np.uint8)
+        else:
+            # 棄却・同定不能時: 棄却情報パネル
+            p3 = np.full((h_target, p3_w, 3), 35, dtype=np.uint8)
+            cv2.rectangle(p3, (15, 15), (p3_w - 15, h_target - 15), (60, 60, 180), 2)
+            cv2.putText(p3, "REJECTED", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 80, 255), 2)
+            cv2.putText(p3, f"Status: {status}", (30, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+
+            if best_match:
+                s_val = best_match.get("combined_score", best_match.get("score", 0.0))
+                inl_val = best_match.get("inliers", 0)
+                cv2.putText(p3, "Top Guess (Unconfirmed):", (30, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 140), 1)
+                cv2.putText(p3, f"{best_match.get('name', '')[:16]}", (30, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 255), 1)
+                cv2.putText(p3, f"Score: {s_val:.1f} | Inliers: {inl_val}", (30, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+            else:
+                cv2.putText(p3, "No valid card match", (30, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 140), 1)
+
+            cv2.putText(p3, "Safe Rejection Mode", (30, h_target - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 200, 100), 1)
 
         # ヘッダー・キャプション用余白を追加
         def add_caption(img, text, subtext=""):
             canvas = np.zeros((img.shape[0] + 60, img.shape[1], 3), dtype=np.uint8)
             canvas[60:, :] = img
-            cv2.putText(
-                canvas, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-            )
+            cv2.putText(canvas, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
             if subtext:
-                cv2.putText(
-                    canvas, subtext, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 200), 1
-                )
+                cv2.putText(canvas, subtext, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 200), 1)
             return canvas
 
-        p1_cap = add_caption(p1, "1. Input Photo", "Detected boundary (Green)")
-        p2_cap = add_caption(p2, "2. Perspective Rectified", "Aligned front view")
-        score_val = best_match.get("combined_score", best_match.get("score", 0.0))
-        p3_cap = add_caption(
-            p3,
-            f"3. Matched: {best_match['name'][:18]}",
-            f"Score: {score_val:.1f} | Inliers: {best_match.get('inliers', 0)}",
-        )
+        p1_cap = add_caption(p1, "1. Input Photo", "Detected boundary" if corners is not None else "No quad detected")
+        p2_cap = add_caption(p2, "2. Perspective Rectified", "Aligned front view" if corners is not None else "Direct crop")
+        if status in ("CONFIDENT", "LOW_CONFIDENCE") and best_match:
+            score_val = best_match.get("combined_score", best_match.get("score", 0.0))
+            p3_cap = add_caption(
+                p3,
+                f"3. Matched: {best_match['name'][:18]}",
+                f"Status: {status} | Score: {score_val:.1f} | Inliers: {best_match.get('inliers', 0)}",
+            )
+        else:
+            p3_cap = add_caption(
+                p3,
+                f"3. Status: {status}",
+                "Identification safely rejected (MISS)",
+            )
 
         # 3つのパネルを水平結合
         combined = np.hstack([p1_cap, p2_cap, p3_cap])
